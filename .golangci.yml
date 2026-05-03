@@ -1,0 +1,39 @@
+# golangci-lint configuration. See https://golangci-lint.run/usage/configuration
+# Targeted at golangci-lint v2.x. The defaults already enable errcheck, govet,
+# ineffassign, staticcheck, and unused — we just add a few quality-of-life
+# linters and slightly stricter settings.
+
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    - gocritic
+    - misspell
+    - unconvert
+    - unparam
+
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment    # noisy, low-value at this codebase size
+    misspell:
+      locale: US
+
+  exclusions:
+    rules:
+      # Test files often have intentionally awkward shapes (table cases,
+      # nil checks, etc.). Don't fight them.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - unparam
+
+      # Generated swagger glue isn't ours to lint.
+      - path: docs/
+        linters:
+          - all

@@ -1,0 +1,46 @@
+# Keep the build context lean — only what `go build ./cmd/api` actually needs.
+# Anything excluded here is invisible to the builder stage, which means a
+# faster `docker build` and no risk of secrets / large binaries leaking in.
+
+# VCS + editor noise
+.git
+.github
+.vscode
+.idea
+*.swp
+
+# Local secrets and config — never bake into an image.
+.env
+.env.*
+!env.sample
+
+# Local build outputs (the host's `make build` / `go build ./cmd/api` etc.).
+# Anchored with a leading `/` so they only match at the build-context root —
+# unanchored names would also match `./cmd/api/`, `./internal/main/...`, etc.
+# That's exactly the bug that broke our docker build once: bare `api` excluded
+# the cmd/api source directory and the build couldn't find main.go.
+bin/
+/main
+/api
+/url-shortener
+*.exe
+*.test
+*.out
+coverage*
+
+# Docs that aren't compiled in. The `docs/` Go package IS imported (Swagger),
+# so don't exclude that. Markdown is fine to drop.
+*.md
+
+# Toolchain / CI configs not needed inside the image.
+.golangci.yml
+.dockerignore
+Dockerfile
+docker-compose*.yml
+
+# Migrations live next to the API in source, but inside the image we don't
+# ship them — the `migrate` compose service mounts them from the host.
+migrations/
+
+# Misc
+scripts/

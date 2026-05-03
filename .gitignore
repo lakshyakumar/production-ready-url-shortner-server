@@ -1,0 +1,42 @@
+# Created by https://www.toptal.com/developers/gitignore/api/go
+# Edit at https://www.toptal.com/developers/gitignore?templates=go
+
+### Go ###
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+.env
+.env.test
+
+# Local build outputs. `go build ./cmd/api` defaults to writing `api`;
+# `go build -o ./bin/url-shortener` is what `make build` does. Keep both
+# under-tracked so a stray binary can't be committed (we hit a 63 MB
+# `api` in the initial commit otherwise).
+#
+# Anchored with a leading `/` so they only match at the repo root — unanchored
+# names would also catch `cmd/api/`, `internal/main/...`, etc. (which is
+# exactly the bug that broke our docker build the first time).
+/main
+/api
+/url-shortener
+bin/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+
+# End of https://www.toptal.com/developers/gitignore/api/go

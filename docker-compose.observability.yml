@@ -1,0 +1,43 @@
+# Optional observability override. Layer it on top of the base compose file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up --build
+#
+# Adds Jaeger (OTLP HTTP collector + UI) and Prometheus, and points the api
+# service at the in-network Jaeger endpoint so traces show up automatically.
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      # UI — http://localhost:16686
+      - "16686:16686"
+      # OTLP HTTP receiver. Reachable inside the network as http://jaeger:4318;
+      # we publish on the host too for convenience when running the API outside
+      # compose (`make run`) against the dockerised collector.
+      - "4318:4318"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # Short retention is fine for a local stack; bump in real deploys.
+      - --storage.tsdb.retention.time=24h
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  api:
+    environment:
+      # Turn tracing on. The api service in the base file already declares
+      # this var; the override just sets a non-empty value.
+      OtelExporterEndpoint: "http://jaeger:4318"
+    depends_on:
+      jaeger:
+        condition: service_started
+      prometheus:
+        condition: service_started

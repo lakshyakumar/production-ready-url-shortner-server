@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook for the URL shortener.
+#
+# Runs the same checks as CI, but on local code:
+#   1. gofmt -w on staged .go files (auto-fixes; restages)
+#   2. swag init — regenerate Swagger docs when annotation sources change
+#      (auto-restages docs/; skipped with a warning if swag isn't installed)
+#   3. go vet ./...
+#   4. golangci-lint run (skipped with a warning if not installed)
+#   5. go build ./... — every package compiles. Fast and a clearer
+#      failure surface than "tests didn't compile".
+#   6. test-coverage — full unit+integration suite with -coverpkg=./...,
+#      fails if total coverage < COVERAGE_THRESHOLD (default 60%).
+#      Skipped with a warning if Docker isn't running, since integration
+#      tests would skip and tank the percentage.
+#
+# Install with:  make init
+# Bypass once with:  git commit --no-verify  (don't make a habit of it)
+
+set -euo pipefail
+
+# Locate the Go module root, which may be a *subdirectory* of the git repo
+# (this hook lives at <module_root>/scripts/git-hooks/pre-commit and is
+# invoked via a symlink from .git/hooks/pre-commit). Resolving the symlink
+# is necessary because $0 points at .git/hooks/pre-commit on invocation;
+# using `git rev-parse --show-toplevel` would land us at the git root,
+# which may not contain go.mod.
+HOOK_PATH="${BASH_SOURCE[0]}"
+while [ -L "$HOOK_PATH" ]; do
+  link_target="$(readlink "$HOOK_PATH")"
+  hook_dir="$(cd -P "$(dirname "$HOOK_PATH")" && pwd)"
+  case "$link_target" in
+    /*) HOOK_PATH="$link_target" ;;
+    *)  HOOK_PATH="$hook_dir/$link_target" ;;
+  esac
+done
+MODULE_ROOT="$(cd -P "$(dirname "$HOOK_PATH")/../.." && pwd)"
+
+if [ ! -f "$MODULE_ROOT/go.mod" ]; then
+  printf "pre-commit: expected go.mod at %s but none found\n" "$MODULE_ROOT" >&2
+  exit 1
+fi
+
+cd "$MODULE_ROOT"
+
+# Ensure Go-installed tools are discoverable. Git hooks (especially when
+# triggered from a GUI like VS Code's source control) inherit a minimal
+# PATH that often excludes:
+#   - the Go toolchain itself (Homebrew at /opt/homebrew/bin, /usr/local/bin)
+#   - `$GOPATH/bin`, where `go install` puts CLIs like swag and golangci-lint
+# Without these, the hook would warn-and-skip those steps even when every
+# tool is installed.
+prepend_path() {
+  case ":$PATH:" in
+    *":$1:"*) ;;                      # already there
+    *) [ -d "$1" ] && export PATH="$1:$PATH" ;;
+  esac
+}
+# Common Go toolchain locations.
+prepend_path /opt/homebrew/bin        # macOS Homebrew (Apple Silicon)
+prepend_path /usr/local/bin           # macOS Homebrew (Intel) / common Linux
+
+# `$GOPATH/bin` — ask `go env` if available, else fall back to the documented default.
+if command -v go >/dev/null 2>&1; then
+  prepend_path "$(go env GOPATH)/bin"
+else
+  prepend_path "${GOPATH:-$HOME/go}/bin"
+fi
+unset -f prepend_path
+
+# Pretty-print colours (no-op when stdout isn't a TTY).
+if [ -t 1 ]; then
+  C_DIM='\033[2m'; C_RED='\033[31m'; C_GREEN='\033[32m'; C_YELLOW='\033[33m'; C_RESET='\033[0m'
+else
+  C_DIM=''; C_RED=''; C_GREEN=''; C_YELLOW=''; C_RESET=''
+fi
+
+step()    { printf "%b→%b %s\n" "$C_DIM" "$C_RESET" "$1"; }
+ok()      { printf "  %b✓%b %s\n" "$C_GREEN" "$C_RESET" "$1"; }
+warn()    { printf "  %b!%b %s\n" "$C_YELLOW" "$C_RESET" "$1"; }
+fail()    { printf "  %b✗%b %s\n" "$C_RED" "$C_RESET" "$1"; exit 1; }
+
+# ---- 1. gofmt -w on staged .go files ----------------------------------------
+# `--relative` filters to paths inside the module root and emits them
+# relative to it, so gofmt and `git add` (which auto-prepends the cwd)
+# both find them. Files staged outside the module are intentionally
+# ignored — they're not part of this build.
+step "gofmt"
+staged_go=$(git diff --cached --name-only --diff-filter=ACMR --relative -- '*.go' || true)
+if [ -n "$staged_go" ]; then
+  needs_fmt=$(gofmt -l $staged_go || true)
+  if [ -n "$needs_fmt" ]; then
+    warn "formatting and restaging:"
+    printf "    %s\n" $needs_fmt
+    gofmt -w $needs_fmt
+    git add $needs_fmt
+  fi
+fi
+ok "gofmt clean"
+
+# ---- 2. swag (Swagger) regen ------------------------------------------------
+# Only run when staged changes touch files that carry swag annotations:
+# the entry point's @title/@version block, and any handler with @Router /
+# @Summary / @Param tags. Most commits don't touch those, so this is a
+# no-op nearly all the time and silent.
+#
+# When it does run, it regenerates docs/{docs.go,swagger.json,swagger.yaml}
+# and auto-restages the diff so the commit always carries up-to-date specs.
+step "swag (Swagger docs)"
+# `--relative` keeps the path globs module-relative (matches the gofmt step
+# above). Without it, when the module sits in a subdirectory of the git
+# root, the patterns wouldn't match anything.
+staged_swag_sources=$(git diff --cached --name-only --diff-filter=ACMR --relative \
+  -- 'cmd/api/main.go' 'internal/api/handlers/*.go' || true)
+if [ -z "$staged_swag_sources" ]; then
+  ok "no annotation sources staged — skipping regen"
+elif command -v swag >/dev/null 2>&1; then
+  swag init -d ./cmd/api,./internal/api -g main.go -o docs --quiet || fail "swag init failed"
+  # Restage if regen actually produced a diff. Both staged and unstaged
+  # diffs in docs/ count — swag rewrites whether or not anything changed.
+  docs_changed=$(git status --porcelain -- docs/ | awk '{print $2}' || true)
+  if [ -n "$docs_changed" ]; then
+    warn "regenerated and restaging:"
+    printf "    %s\n" $docs_changed
+    git add docs/
+  fi
+  ok "swagger docs in sync"
+else
+  warn "swag not installed — skipping doc regen"
+  warn "install: go install github.com/swaggo/swag/cmd/swag@latest"
+fi
+
+# ---- 3. go vet --------------------------------------------------------------
+step "go vet"
+go vet ./... || fail "go vet found issues"
+ok "vet clean"
+
+# ---- 4. golangci-lint -------------------------------------------------------
+step "golangci-lint"
+if command -v golangci-lint >/dev/null 2>&1; then
+  golangci-lint run || fail "golangci-lint reported issues"
+  ok "lint clean"
+else
+  warn "golangci-lint not installed — skipping"
+  warn "install: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"
+fi
+
+# ---- 5. build all packages --------------------------------------------------
+# Catch compilation errors directly rather than letting them surface as
+# "test build failed". `go build ./...` won't produce binaries (no main
+# in non-cmd packages) but does type-check every package.
+step "go build ./..."
+go build ./... || fail "go build ./... failed"
+ok "build clean"
+
+# ---- 6. tests + coverage gate -----------------------------------------------
+# Coverage requires integration tests to actually run, otherwise repository
+# coverage drops to zero and tanks the total. Skip the whole gate (with a
+# loud warning) when Docker isn't running so dev-time commits don't get
+# blocked on infra. CI will enforce on push.
+step "test-coverage (≥ ${COVERAGE_THRESHOLD:-60}%)"
+if docker info >/dev/null 2>&1; then
+  make -s test-coverage || fail "tests or coverage gate failed"
+  ok "tests + coverage passed"
+else
+  warn "docker not running — skipping tests + coverage"
+  warn "CI will enforce on push; locally: start Docker, then re-run"
+fi
+
+printf "\n%b✓%b pre-commit checks passed\n" "$C_GREEN" "$C_RESET"

@@ -1,0 +1,139 @@
+basePath: /
+definitions:
+  handlers.ShortenRequest:
+    properties:
+      url:
+        example: https://example.com/very/long/path
+        type: string
+    required:
+    - url
+    type: object
+  response.APIError:
+    properties:
+      code:
+        example: internal_error
+        type: string
+      message:
+        example: failed to create short url
+        type: string
+    type: object
+  response.Envelope:
+    properties:
+      data: {}
+      error:
+        $ref: '#/definitions/response.APIError'
+      success:
+        type: boolean
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  description: Production-ready URL shortener service.
+  title: URL Shortener API
+  version: "1.0"
+paths:
+  /{key}:
+    get:
+      description: Looks up the short key and issues a 301 redirect to the original
+        URL.
+      parameters:
+      - description: Short key
+        in: path
+        name: key
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "301":
+          description: Moved Permanently
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/response.Envelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/response.Envelope'
+        "504":
+          description: Gateway Timeout
+          schema:
+            $ref: '#/definitions/response.Envelope'
+      summary: Redirect to original URL
+      tags:
+      - urls
+  /liveness:
+    get:
+      description: Returns 200 if the process is alive. Used by orchestrators to detect
+        a crashed process.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/response.Envelope'
+      summary: Liveness probe
+      tags:
+      - health
+  /readiness:
+    get:
+      description: Pings the database with a 2-second timeout. Returns 503 if the
+        database is unreachable.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/response.Envelope'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/response.Envelope'
+        "504":
+          description: Gateway Timeout
+          schema:
+            $ref: '#/definitions/response.Envelope'
+      summary: Readiness probe
+      tags:
+      - health
+  /shorten:
+    post:
+      consumes:
+      - application/json
+      description: Accepts a long URL and returns a shortened version with a generated
+        short key.
+      parameters:
+      - description: URL to shorten
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/handlers.ShortenRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/response.Envelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/response.Envelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/response.Envelope'
+        "504":
+          description: Gateway Timeout
+          schema:
+            $ref: '#/definitions/response.Envelope'
+      summary: Create a short URL
+      tags:
+      - urls
+schemes:
+- http
+- https
+swagger: "2.0"

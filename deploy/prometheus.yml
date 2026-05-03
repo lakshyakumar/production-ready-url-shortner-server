@@ -1,0 +1,12 @@
+# Minimal Prometheus config for the local compose stack. Inside the compose
+# network, the api debug server is reachable as `api:6060` — host
+# `host.docker.internal` is not needed.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: url-shortener
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['api:6060']

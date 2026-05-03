@@ -1,0 +1,98 @@
+# Standalone deployment of the URL shortener with everything it needs:
+# Postgres, Redis, a one-shot migrator, and the API itself. Bring it up with:
+#
+#   docker compose up --build
+#
+# To also run the observability stack (Jaeger + Prometheus), add the
+# override file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up --build
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: urlshortner
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    # pg_isready is the canonical readiness check — the API service waits on
+    # this via depends_on.condition: service_healthy.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d urlshortner"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "PING"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # One-shot migrator. Runs golang-migrate against the DB once, then exits.
+  # The api service depends_on this with condition: service_completed_successfully
+  # so the schema is guaranteed in place before the binary starts.
+  migrate:
+    image: migrate/migrate:v4.18.1
+    volumes:
+      - ./migrations:/migrations:ro
+    command: >-
+      -path=/migrations
+      -database=postgres://postgres:postgres@db:5432/urlshortner?sslmode=disable
+      up
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      # Keep version metadata local-friendly. CI overrides via --build-arg.
+      args:
+        VERSION: dev
+        COMMIT: local
+    image: url-shortener:dev
+    environment:
+      ServerPort: "8080"
+      PprofPort: "6060"
+      LogLevel: "info"
+      DatabaseURL: "postgres://postgres:postgres@db:5432/urlshortner?sslmode=disable"
+      ReadDatabaseURL: ""
+      CleanUpInterval: "1m"
+      URLUnusedThreshold: "24h"
+      RedisURL: "redis://redis:6379/0"
+      RedisOpTimeout: "100ms"
+      RateLimitPerMinute: "100"
+      RateLimitWindow: "1m"
+      ServiceName: "url-shortener"
+      ServiceVersion: "dev"
+      # Tracing off by default in this base file. The observability override
+      # turns it on by setting OtelExporterEndpoint=http://jaeger:4318.
+      OtelExporterEndpoint: ""
+      OtelSampleRatio: "1.0"
+    ports:
+      # API — public.
+      - "8080:8080"
+      # Debug (pprof + /metrics) — host-bound to localhost so it can't be
+      # reached from outside this machine. See the README's "Hardening
+      # :PprofPort for production" section.
+      - "127.0.0.1:6060:6060"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  db-data:

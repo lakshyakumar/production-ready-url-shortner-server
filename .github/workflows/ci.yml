@@ -1,0 +1,156 @@
+name: CI
+
+# Run on every push to any branch and on every PR. Pre-merge gating happens
+# via branch protection — see .github/workflows/README or the repo settings.
+#
+# Tag pushes (vX.Y.Z) additionally publish the Docker image to GHCR — see the
+# `docker-build` job below.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+    branches: ['**']
+
+# A single concurrency group per ref means a fast follow-up push cancels the
+# in-flight run for the same branch — saves runner minutes during rapid
+# iteration without affecting parallel branches.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: lint + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          # The setup-go action handles module + build cache automatically.
+          cache: true
+
+      # CI must NOT auto-format. We check, and fail loudly if anything is
+      # out of formatting — the contributor runs `gofmt -w` (or `make fmt`)
+      # locally and pushes again.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::Files need formatting (run 'gofmt -w .' locally):"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        # Action v7+ is required to install golangci-lint v2 binaries.
+        # v6 hard-rejects any v2.x string with "golangci-lint v2 is not
+        # supported by golangci-lint-action v6". We need v2 because:
+        #   1. .golangci.yml uses the v2 config schema (`version: "2"`)
+        #   2. go.mod targets Go 1.26.1, which v1.x golangci-lint binaries
+        #      can't load (they're built with Go 1.24).
+        # Bump the binary `version:` in lockstep with local upgrades.
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.12.1
+          # Reuse module cache from setup-go to avoid double-downloading.
+          skip-cache: false
+
+      - name: Build
+        run: go build ./...
+
+      # Single command: runs unit + integration with -coverpkg=./..., then
+      # fails if total coverage < COVERAGE_THRESHOLD (default 60%).
+      # Integration tests use testcontainers; ubuntu-latest runners ship
+      # with Docker, so this Just Works without extra setup. First run
+      # pulls postgres:16-alpine (~80MB); subsequent runs hit layer cache.
+      - name: Tests + coverage gate
+        run: make test-coverage
+
+      # Surface coverage in the PR/run UI even on success.
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f coverage.out ]; then
+            echo "## Coverage" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            go tool cover -func=coverage.out | tail -20 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-profile
+          path: coverage.out
+          if-no-files-found: ignore
+
+  # Builds the distroless image on every push (catches Dockerfile breakage
+  # in PRs without paying for a registry push). On tag pushes (vX.Y.Z) it
+  # additionally logs into GHCR and publishes :<tag> + :latest.
+  #
+  # `needs: ci` means this never builds an image whose tests just failed.
+  docker-build:
+    name: docker image
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+      # Required to push to ghcr.io with GITHUB_TOKEN. Read-only otherwise.
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Compute the image reference and tag list once. For tag pushes we
+      # tag the image with both the git tag (e.g. v1.2.3) and `latest`; for
+      # branch pushes we just verify the build succeeds — no tags, no push.
+      - name: Compute metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push on tag)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # On a tag push: push to GHCR. On every other event: just build
+          # locally to verify the Dockerfile still works.
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version || 'dev' }}
+            COMMIT=${{ github.sha }}
+          # GHA-backed buildx cache. First push warms it; subsequent runs
+          # get the module/build layers for free.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
